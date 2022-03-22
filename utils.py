@@ -1,4 +1,6 @@
 import re
+import gzip
+import os
 from operator import itemgetter
 
 def reverse_complement(string):
@@ -41,8 +43,16 @@ def parse_fasta(path):
     scaffolds = {}
     sequences = []
     current = ''
-    with open(path, 'r') as fh:
+    _, ext = os.path.splitext(path)
+    op = lambda x: gzip.open(x, 'rb') if ext == '.gz' else open
+    with op(path) as fh:
         for line in fh:
+            # Decode bytestring if .gz
+            try:
+                line = line.decode('utf-8')
+            except AttributeError as e:
+                pass
+
             line = line.rstrip('\n')
             if line.startswith('>'):
                 if len(current) > 0:

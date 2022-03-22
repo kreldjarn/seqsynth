@@ -5,10 +5,12 @@ import gzip
 import argparse
 import random
 import copy
+import uuid
 from operator import itemgetter
 
 from utils import reverse_complement, parse_rest, parse_fasta, merge_intervals, get_complement
 
+from numpy import random as nprand
 from colorama import Fore, Back, Style
 
 class SeqSynth:
@@ -17,30 +19,13 @@ class SeqSynth:
         self.fa   = fa
         self.gene = gene
         self.txs = {}
+        self.novel_txs = {}
         self.event_spec = []
+        self.phenotypes = {}
 
         # Setup
         self.parse_gtf()
         self.scaffolds = parse_fasta(self.fa)
-
-
-        '''
-        for k, tx in self.txs.items():
-            print(k)
-            for utr in tx['utrs']:
-                print(utr['feature'], utr['strand'])
-                utr = self.scaffolds[utr['scaffold']][utr['start']-10:utr['end']+10]
-                if 'AATAAA' in utr:
-                    print('Found a thing!')
-                    print(utr)
-                    print(utr.count('AATAAA'))
-                if 'TTTATT' in utr:
-                    print('Found a reciprocal thing!')
-                    print(utr)
-                    print(utr.count('TTTATT'))
-
-            print('==========')
-        '''
 
     """
       ____________
@@ -118,20 +103,29 @@ class SeqSynth:
             ivs = [(f['start'], f['end']) for f in tx['exons']]
             tx['introns'] = get_complement(ivs, lb, ub)
 
-        print(f'Found {len(tx.keys())} transcripts belonging to {Fore.RED}{",".join(self.gene)}{Style.RESET_ALL}')
+        print(f'Found {Fore.GREEN}{len(tx.keys())}{Style.RESET_ALL} transcripts belonging to {Fore.RED}{",".join(self.gene)}{Style.RESET_ALL}')
 
     def parse_event_spec(self, events):
-        types = {'D': 'duplication', 'S': 'skip', 'R': 'retention', 'A': 'APA'}
-        for e in events:
-            try:
-                t = types[e[0].upper()]
-                p = float(e[1:])
-            except KeyError as err:
-                raise KeyError(f'Cannot parse event type {e[0]}')
-            except ValueError as err:
-                raise ValueError(f'Cannot parse effect size {e[1:]}')
+        types = {
+            'D': 'duplication',
+            'S': 'skip',
+            'R': 'retention',
+            'A': 'APA',
+            'N': None
+        }
 
-            self.event_spec.append({'type': t, 'pheno': p})
+        for e in events:
+            t, r, p = e.split('/')
+            try:
+                t = types[t.upper()]
+                r = float(r)
+                p = [float(p_) for p_ in p.split(':')]
+            except KeyError as err:
+                raise KeyError(f'Cannot parse event type {t}.')
+            except ValueError as err:
+                raise ValueError(f'Cannot parse prevalence {r} or effect size {p}.')
+
+            self.event_spec.append({'type': t, 'pheno': p, 'prevalence': r})
 
     """
       ________________________
@@ -141,20 +135,19 @@ class SeqSynth:
     |/_______________________/
 
     """
-    def generate_rna(self):
-        pass
-
     def generate_duplication(self, tx, dups):
         new_tx = copy.deepcopy(self.txs[tx])
         exons = new_tx['exons']
         i, j = random.choices(range(len(exons)), k=2)
         if j < i:
             i, j = j, i
-        exons = exons[:j+1] + exons[i,j+1] + exons[j+1:]
+        exons = exons[:j+1] + exons[i:j+1] + exons[j+1:]
         new_tx['exons'] = exons
         tx_id = f"{new_tx['name']}_D{dups}"
         new_tx['name'] = tx_id
-        self.txs[tx_id] = new_tx
+        self.novel_txs[tx_id] = new_tx
+        print(f'Generated duplication {Fore.RED}{tx_id}{Style.RESET_ALL}')
+        return tx_id
 
     def generate_exon_skip(self, tx, skips):
         new_tx = copy.deepcopy(self.txs[tx])
@@ -166,7 +159,9 @@ class SeqSynth:
         new_tx['exons'] = exons
         tx_id = f"{new_tx['name']}_S{skips}"
         new_tx['name'] = tx_id
-        self.txs[tx_id] = new_tx
+        self.novel_txs[tx_id] = new_tx
+        print(f'Generated exon skip {Fore.RED}{tx_id}{Style.RESET_ALL}')
+        return tx_id
 
     def generate_APA(self, tx, skips):
         # TODO:
@@ -174,6 +169,7 @@ class SeqSynth:
 
         tx['fwd_apa_motifs'] = sum(x.count('AATAAA') for x in tx['utrs'])
         tx['rv_apa_motifs'] = sum(x.count('TTTATT') for x in tx['utrs'])
+        print(f'Generated alternative poly-A {Fore.RED}{tx_id}{Style.RESET_ALL}')
         pass
 
     def generate_retention(self, tx, rets):
@@ -188,94 +184,177 @@ class SeqSynth:
 
         intron = next(x for x in new_tx['introns'] if pred(x))
         intron = {
-            'start' : intron[0],
-            'end'   : intron[1],
-            'strand': exons[i]['strand']
+            'start'   : intron[0],
+            'end'     : intron[1],
+            'strand'  : exons[i]['strand'],
+            'scaffold': exons[i]['scaffold']
         }
 
         new_tx['exons'] = exons[:i+1] + [intron] + exons[i+1:]
         tx_id = f"{new_tx['name']}_S{rets}"
         new_tx['name'] = tx_id
-        self.txs[tx_id] = new_tx
+        self.novel_txs[tx_id] = new_tx
+        print(f'Generated intron retention {Fore.RED}{tx_id}{Style.RESET_ALL}')
+        return tx_id
 
     def generate_events(self):
-        phenotypes = {}
-        novel_txs = {}
         dups, skips, apas, rets = 0, 0, 0, 0
         for e in self.event_spec:
             if e['type'] is not None:
-                tx = random.choice(self_txs.keys())
+                tx = random.choice(list(self.txs.keys()))
                 if e['type'] == 'duplication':
                     dups += 1
-                    fields = generate_duplication(tx, dups)
+                    tx_id = self.generate_duplication(tx, dups)
                 elif e['type'] == 'skip':
                     skips += 1
-                    fields = generate_exon_skip(tx, skips)
+                    tx_id = self.generate_exon_skip(tx, skips)
                 elif e['type'] == 'APA':
                     apas += 1
-                    fields = generate_APA(tx, apas)
+                    tx_id = self.generate_APA(tx, apas)
                 elif e['type'] == 'retention':
                     rets += 1
-                    fields = generate_retention(tx, rets)
+                    tx_id = self.generate_retention(tx, rets)
 
-                novel_txs[tx] = fields
-
-                if e['pheno'] != 0:
-                    phenotypes[tx] = e['pheno']
+                self.phenotypes[tx_id] = {'effect': e['pheno'],
+                                          'prevalence': e['prevalence'],
+                                          'type': e['type']}
             else:
                 tx = random.choice(self_txs.keys())
-                phenotypes[tx] = e['pheno']
+                self.phenotypes[tx] = {'effect': e['pheno'],
+                                       'prevalence': e['prevalence'],
+                                       'type': None}
 
-        self.txs = dict(self.txs.items(), new_txs.items())
-        self.phenotypes = phenotypes
 
-    def find_splice_junctions(self, gtf, fa, od='.', k=31):
-        genes = parse_gff(gff_path)
-        print('gff parsed')
-        scaffolds = parse_fasta(fasta_path)
-        print('scaffolds parsed')
-        starts = []
-        ends = []
+    """
+      _______________________
+     /|                      |
+    | |  EXPRESSION PROFILE  |
+    | |______________________|
+    |/______________________/
 
-        wrong_scaffolds = 0
-        for gene, data in genes.items():
-            starts = []
-            ends = []
-            intervals = []
-            if data['scaffold'] in scaffolds:
-                sequence = scaffolds[data['scaffold']]
-            else:
-                print(f'{data["scaffold"]} not in FASTA file {fasta_path}')
-                wrong_scaffolds += 1
-                continue
-            for exon in data['exons']:
-                intervals.append((int(exon['start'])-1, int(exon['end'])))
+    """
+    def generate_profile(self, N):
+        profile = {str(uuid.uuid4())[:7].upper(): [] for _ in range(N)}
+        events = copy.deepcopy(self.phenotypes)
+        for tx, e in events.items():
+            # We want at least one individual with the event, otherwise what is
+            # the point?
+            e['indiv'] = random.choices(list(profile.keys()),
+                                        k=max(1, int(e['prevalence'] * N)))
+            for i in e['indiv']:
+                profile[i].append(tx)
 
-            intervals = merge_intervals(intervals)
-            sjs = []
-            for iv in intervals:
-                if iv[1] - iv[0] < 3 * k - 3:
-                    # If the length of the exon is < k-1
-                    sjs.append(iv)
-                else:
-                    sjs.append((iv[0], iv[0] + 2 * k - 2))
-                    sjs.append((iv[1] - (2 * k) + 2, iv[1]))
+        self.phenotypes = events
+        N_wt_tx = len(self.txs.keys())
+        for pn in profile.keys():
+            txs = random.choices(list(self.txs.keys()), k=random.choice(range(1, N_wt_tx)))
+            profile[pn] = list(set(profile[pn] + txs))
+        return profile
 
-            splice_junctions = [
-                collapse_N(sequence[iv[0]:iv[1]].upper()) for iv in sjs
-            ]
+    """
+      _______________________
+     /|                      |
+    | |  GENOTYPE RENDERERS  |
+    | |______________________|
+    |/______________________/
 
-            if data['strand'] == '-':
-                splice_junctions = map(reverse_complement, splice_junctions)
-            with open(f'{od}/splice_junctions.fasta', 'a') as fh:
-                for i, sj in enumerate(splice_junctions):
-                    fh.write(f'>{gene}:{i}\n')
-                    fh.write(f'{sj}\n')
-        print(f'{wrong_scaffolds} scaffolds not found')
+    """
+    def render_transcript(self, tx):
+        tx = self.txs[tx] if tx in self.txs else self.novel_txs[tx]
+        scaffold = self.scaffolds[tx['exons'][0]['scaffold']]
+        seq = ''.join(scaffold[e['start']:e['end']] for e in tx['exons'])
+        if tx['strand'] == '-':
+            seq = reverse_complement(seq)
+        return seq
 
-    def render_reads(self):
-        pass
+    def render_read(self, tx):
+        frag_length = int(nprand.normal(400, 100))
+        read_length = int(nprand.normal(100, 25))
+        start = max(0, len(tx) - frag_length)
+        end = min(len(tx)-1, start+read_length)
+        return tx[start:end]
 
+    def render_reads(self, profile, depth, out):
+        all_txs = list(self.txs.keys()) + list(self.novel_txs.keys())
+        ratios = {tx: random.choice(range(1, 100)) for tx in all_txs}
+
+        txs_seq = {}
+        with open(out, 'w') as fh:
+            for pn, txs in profile.items():
+                denom = sum(ratios[tx] for tx in txs)
+                # TODO: implement std dev for expression
+                total_expr = nprand.normal(depth, depth/10)
+                running_sum = 0
+
+                # R1_fh = open(os.path.join(out, f'{pn}_S1_L001_R1_001.fastq'))
+                # R2_fh = open(os.path.join(out, f'{pn}_S1_L001_R2_001.fastq'))
+                for tx in txs:
+                    if tx not in txs_seq:
+                        # If not memoized yet
+                        txs_seq[tx] = self.render_transcript(tx)
+
+                    mean = total_expr * ratios[tx]/denom
+                    tx_expr = int(nprand.normal(mean, mean/10))
+                    reads = (self.render_read(txs_seq[tx]) for _ in range(tx_expr))
+                    # for fwd, rev in reads:
+                        # render_fastq(pn, fwd, rwd, R1_fh, R2_fh)
+                    for i, fwd in enumerate(reads):
+                        fh.write(f'>{pn} {tx} {i}')
+                        fh.write('\n')
+                        fh.write(fwd)
+                        fh.write('\n')
+                        running_sum += 1
+
+                print(f'Generated {Fore.GREEN}{running_sum}{Style.RESET_ALL} reads of {Fore.GREEN}{len(txs)}{Style.RESET_ALL} transcripts for pn {Fore.RED}{pn}{Style.RESET_ALL} ({Fore.RED}{", ".join(txs)}{Style.RESET_ALL})')
+
+                # close(R1_fh)
+                # close(R2_fh)
+
+    """
+      _________________________
+     /|                        |
+    | |  PHENOTYPE GENERATORS  |
+    | |________________________|
+    |/________________________/
+
+    """
+    def generate_phenotypes(self, profile, path):
+        try:
+            os.makedirs(path)
+        except FileExistsError as e:
+            pass
+
+        for tx, p in self.phenotypes.items():
+            # 1. Generate N samples from a normal distribution.
+            # 2. Find pns with correlated phenotype.
+            # 3. Multiply the phenotype by the effect size.
+            # 4. Write the phenotype to disk.
+            pf = p['effect']
+            effect = pf[0]
+            if len(pf) == 1:
+                pf[2] = 1
+                pf[1] = effect + 0.5
+
+            while effect <= pf[1]:
+                effect_mult = effect + 1.0
+                pheno = {k:v for k, v in zip(profile.keys(), nprand.normal(0, 1, len(profile)))}
+                for i in p['indiv']:
+                    pheno[i] *= effect_mult
+
+                with open(os.path.join(path, f'pheno_{tx}_{effect}'), 'w') as fh:
+                    for k,v in pheno.items():
+                        fh.write(f'{k}\t{v}\n')
+
+                effect += pf[2]
+
+"""
+  ___________
+ /|          |
+| |  DRIVER  |
+| |__________|
+|/__________/
+
+"""
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Generate simulated RNA reads for a cohort.'
@@ -287,17 +366,20 @@ if __name__ == '__main__':
     parser.add_argument('--genes', help='The gene(s) to generate reads for',
                         nargs='*', type=str)
     parser.add_argument('--events', help='''
-            Denote events and phenotypes. D0.1 denotes a duplication event with
-            a phenotype 10 percent correlated with it. Other options include A:
-            alternative poly-A, S: exon skip, R: intron retention.
+            Denote events and phenotypes. D/0.04/0.1 denotes a duplication event
+            present in 4 percent of the cohort, which correlates 10 percent with
+            a phenotype. Other options include A: alternative poly-A, S: exon
+            skip, R: intron retention.
             ''', nargs='*', type=str)
-    parser.add_argument('--out', help='The output directory', nargs=1, type=str)
+    parser.add_argument('--out-fasta', help='The output fasta file', type=str)
+    parser.add_argument('--out-pheno', help='The output phenotype file', type=str)
 
     args = parser.parse_args()
 
     seq = SeqSynth(args.gtf, args.fa, args.genes)
-    #seq.parse_event_spec(args.event_spec)
+    seq.parse_event_spec(args.events)
+    seq.generate_events()
 
-    seq.generate_reads(args.N, args.depth)
-
-
+    profile = seq.generate_profile(args.N)
+    seqs = seq.render_reads(profile, args.depth, args.out_fasta)
+    seq.generate_phenotypes(profile, args.out_pheno)
